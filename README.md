@@ -36,3 +36,11 @@ Semantics (in the sense how such a string represents a lambda term in the usual 
 - Unbound variables are not supported. As a workaround, you could add outer abstractions to bind all variables.
 - Abstraction goes as far as possible.
 - Application is left-associated.
+
+## Rewriters for pure lambda terms
+
+In the file `code/reducer.hpp` are the rewriters (and friends). It implements eta-conversion and beta-reduction (in normal order, with call-by-need a.k.a. memoised lazy evaluation).
+
+The structures defined in the file follows visitor pattern. The visitor `LambdaCalculus::Reduction::EtaConversion` walks through the syntax tree, discovers oppotunities of eta-conversion and performs the rewriting. The visitor `DeepCloneAndReplace` is a helper to beta-reduction. It is used to do the substitution. Finally, there is `BetaReduction`, which performs one beta-reduction at a time in normal order, changing all the references to the reduced term (memoised evaluation).
+
+The toy program `code/toys/parse-reduce-print.cpp` reads lambda terms, reduces them step by step, printing the intermediate results.
