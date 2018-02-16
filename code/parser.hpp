@@ -7,7 +7,7 @@
 
 namespace DeBruijnIndex
 {
-    typedef LambdaCalculus::Term::RefCountPtr TermPtr;
+    typedef LambdaCalculus::Term::Pointer TermPtr;
 
     namespace Lexer
     {
@@ -121,25 +121,15 @@ namespace DeBruijnIndex
             Token current;
             static bool StringContainsChar(char const *str, char ch)
             {
-                for (; *str; ++str)
-                {
-                    if (*str == ch)
-                    {
-                        return true;
-                    }
-                }
-                return false;
+                for (; *str && *str != ch; ++str)
+                    ;
+                return *str;
             }
             static bool StringStartsWith(char const *str, char const *pattern)
             {
-                for (; *pattern; ++pattern, ++str)
-                {
-                    if (*str != *pattern)
-                    {
-                        return false;
-                    }
-                }
-                return true;
+                for (; *pattern && *(pattern++) == *(str++); )
+                    ;
+                return !*pattern;
             }
             static bool IsWhitespace(char ch)
             {
@@ -164,6 +154,38 @@ namespace DeBruijnIndex
 
     namespace Parser
     {
+        struct AbstractionBoundStack
+        {
+        private:
+            typedef Utilities::RefCountMemPool<AbstractionBoundStack> MemPool;
+        public:
+            AbstractionBoundStack() = delete;
+            AbstractionBoundStack(AbstractionBoundStack const &) = delete;
+            AbstractionBoundStack(AbstractionBoundStack &&) = delete;
+            AbstractionBoundStack &operator = (AbstractionBoundStack const &) = delete;
+            AbstractionBoundStack &operator = (AbstractionBoundStack &&) = delete;
+            ~AbstractionBoundStack() = delete;
+            typedef MemPool::Entry *Pointer;
+            static Pointer Push(TermPtr entry, Pointer stack)
+            {
+                auto result = MemPool::Default.Allocate();
+                result->Data.Entry.MoveConstructor(std::move(entry));
+                result->Data.LastEntry = stack;
+                return result;
+            }
+            static Pointer Pop(Pointer stack)
+            {
+                auto result = stack->Data.LastEntry;
+                stack->Data.Entry.Finalise();
+                MemPool::Default.Deallocate(stack);
+                return result;
+            }
+            void DefaultConstructor() { }
+            void Finalise() { }
+            TermPtr Entry;
+            Pointer LastEntry;
+        };
+
         /*            Term -> ApplicationTerm* lambda Term
          *            Term -> ApplicationTerm+
          * ApplicationTerm -> const | var | (Term)
@@ -177,21 +199,24 @@ namespace DeBruijnIndex
             ParserImpl &operator = (ParserImpl &&) = delete;
             ParserImpl &operator = (ParserImpl const &) = delete;
             template <typename U>
-            ParserImpl(char const *input, U &&query)
-                : src(input), err(nullptr), errpos(nullptr),
-                query(std::forward<U>(query))
+            ParserImpl(char const *input, U &&constants)
+                : stack(nullptr), src(input),
+                err(nullptr), errpos(nullptr),
+                constants(std::forward<U>(constants))
             { }
-            
+
+            AbstractionBoundStack::Pointer stack;
             Lexer::TokenSource src;
             char const *err;
             char const *errpos;
-            T query;
+            T constants;
 
-            bool Parse(TermPtr &result)
+            TermPtr Parse()
             {
-                if (!ParseTerm(result, 0))
+                auto result = ParseTerm();
+                if (!(bool)result)
                 {
-                    return false;
+                    return nullptr;
                 }
                 auto token = src.PeekCurrent();
                 switch (token.Kind)
@@ -199,150 +224,202 @@ namespace DeBruijnIndex
                     case Lexer::Token::InvalidToken:
                         err = "Internal parser error: Invalid token should have been dealt with by ParseTerm.";
                         errpos = nullptr;
-                        return false;
+                        return nullptr;
                     case Lexer::Token::EndOfInputToken:
-                        return true;
+                        return result;
                     case Lexer::Token::LParenthesisToken:
                     case Lexer::Token::RParenthesisToken:
                     case Lexer::Token::LambdaToken:
                     case Lexer::Token::NamedObjectToken:
                     case Lexer::Token::BoundVariableToken:
                         err = "Unexpected token. Expecting end of input.";
-                        return false;
+                        errpos = token.Literal;
+                        return nullptr;
                     default:
                         err = "Internal parser error: Internal parser error should have been dealt with by ParseTerm.";
                         errpos = nullptr;
-                        return false;
+                        return nullptr;
                 }
             }
 
-            bool ParseTerm(TermPtr &result, size_t sh)
+            TermPtr ParseTerm()
             {
-                TermPtr apps, tmp;
+                TermPtr application;
                 while (true)
                 {
                     auto token = src.PeekCurrent();
                     switch (token.Kind)
                     {
                         case Lexer::Token::InvalidToken:
+                        {
                             err = token.ReasonIfInvalid;
                             errpos = token.Literal;
-                            return false;
+                            return nullptr;
+                        }
                         /* Empty expression or Term -> ApplicationTerms+ */
                         case Lexer::Token::EndOfInputToken:
                         case Lexer::Token::RParenthesisToken:
-                            result = std::move(apps);
+                        {
                             err = "(Sub)expression is empty.";
                             errpos = token.Literal;
-                            return (bool)result;
+                            return application;
+                        }
                         /* Term -> ApplicationTerms* lambda Term */
                         case Lexer::Token::LambdaToken:
-                            src.DiscardCurrent();
-                            if (ParseTerm(tmp, sh + 1))
+                        {
+                            if (!(bool)application)
                             {
-                                TermPtr abst;
-                                abst.NewInstance();
-                                abst->AbstractionConstructor(std::move(tmp));
-                                if ((bool)apps)
-                                {
-                                    result.NewInstance();
-                                    result->ApplicationConstructor(
-                                        std::move(apps), std::move(abst)
-                                    );
-                                }
-                                else
-                                {
-                                    result = std::move(abst);
-                                }
-                                return true;
+                                return ParseAbstractionTerm();
                             }
-                            return false;
+                            TermPtr abstraction = ParseAbstractionTerm();
+                            if (!(bool)abstraction)
+                            {
+                                return nullptr;
+                            }
+                            TermPtr result;
+                            result.NewInstance()->ApplicationConstructor(
+                                std::move(application), std::move(abstraction)
+                            );
+                            return result;
+                        }
                         /* ApplicationTerm */
                         case Lexer::Token::LParenthesisToken:
                         case Lexer::Token::BoundVariableToken:
                         case Lexer::Token::NamedObjectToken:
-                            if (!ParseApplicationTerm(tmp, sh))
+                        {
+                            if ((bool)application)
                             {
-                                return false;
-                            }
-                            if ((bool)apps)
-                            {
-                                auto tmpapps = std::move(apps);
-                                apps.NewInstance();
-                                apps->ApplicationConstructor(
-                                    std::move(tmpapps), std::move(tmp)
+                                auto term = ParseApplicationTerm();
+                                if (!(bool)term)
+                                {
+                                    return nullptr;
+                                }
+                                auto nested = std::move(application);
+                                application.NewInstance()->ApplicationConstructor(
+                                    std::move(nested), std::move(term)
                                 );
                             }
                             else
                             {
-                                apps = std::move(tmp);
+                                application = ParseApplicationTerm();
+                                if (!(bool)application)
+                                {
+                                    return nullptr;
+                                }
                             }
                             break;
+                        }
                         default:
+                        {
                             err = "Internal parser error: lexer returns inconsistent data.";
                             errpos = nullptr;
-                            return false;
+                            return nullptr;
+                        }
                     }
                 }
             }
 
-            bool ParseApplicationTerm(TermPtr &result, size_t sh)
+            TermPtr ParseApplicationTerm()
             {
-                TermPtr tmp;
                 auto token = src.PeekCurrent();
                 switch (token.Kind)
                 {
                     /* ApplicationTerm -> (Term) */
                     case Lexer::Token::LParenthesisToken:
+                    {
                         src.DiscardCurrent();
-                        if (!ParseTerm(result, sh))
+                        auto result = ParseTerm();
+                        if (!(bool)result)
                         {
-                            return false;
+                            return nullptr;
                         }
                         token = src.PeekCurrent();
                         if (token.Kind != Lexer::Token::RParenthesisToken)
                         {
                             err = "Unexpected token. Expecting closing parenthesis.";
                             errpos = token.Literal;
-                            return false;
+                            return nullptr;
                         }
                         src.DiscardCurrent();
-                        return true;
+                        return result;
+                    }
                     /* ApplicationTerm -> var */
                     case Lexer::Token::BoundVariableToken:
-                        if (token.Value > sh)
+                    {
+                        auto boundBy = stack;
+                        for (auto k = token.Value;
+                            (bool)--k && (bool)boundBy;
+                            boundBy = boundBy->Data.LastEntry)
+                            ;
+                        if (!(bool)boundBy)
                         {
                             err = "Stack overflow. Free variable is not supported.";
                             errpos = token.Literal;
-                            return false;
+                            return nullptr;
                         }
+                        TermPtr result;
+                        result.NewInstance()->BoundVariableConstructor(boundBy->Data.Entry);
                         src.DiscardCurrent();
-                        result.NewInstance();
-                        result->BoundVariableConstructor(token.Value);
-                        return true;
+                        return result;
+                    }
                     /* ApplicationTerm -> const */
                     case Lexer::Token::NamedObjectToken:
-                        if ((bool)query(token.Literal, token.Length, tmp))
+                    {
+                        auto result = constants(token.Literal, token.Length);
+                        if ((bool)result)
                         {
-                            result = std::move(tmp);
                             src.DiscardCurrent();
-                            return true;
+                            return result;
                         }
                         err = "Cannot find the specified named expression.";
                         errpos = token.Literal;
-                        return false;
+                        return nullptr;
+                    }
                     case Lexer::Token::InvalidToken:
                     case Lexer::Token::EndOfInputToken:
                     case Lexer::Token::RParenthesisToken:
                     case Lexer::Token::LambdaToken:
+                    {
                         err = "Internal parser error: unexpected call to ParseApplicationTerm at this token.";
                         errpos = token.Literal;
-                        return false;
+                        return nullptr;
+                    }
                     default:
+                    {
                         err = "Internal parser error: lexer returns inconsistent data.";
                         errpos = nullptr;
-                        return false;
+                        return nullptr;
+                    }
                 }
+            }
+
+            TermPtr ParseAbstractionTerm()
+            {
+                auto token = src.PeekCurrent();
+                if (token.Kind == Lexer::Token::InvalidToken)
+                {
+                    err = "Internal parser error: lexer returns inconsistent data.";
+                    errpos = nullptr;
+                    return nullptr;
+                }
+                if (token.Kind != Lexer::Token::LambdaToken)
+                {
+                    err = "Internal parser error: unexpected call to ParseAbstractionTerm at this token.";
+                    errpos = token.Literal;
+                    return nullptr;
+                }
+                src.DiscardCurrent();
+                TermPtr result;
+                result.NewInstance();
+                stack = AbstractionBoundStack::Push(result, stack);
+                auto abstractee = ParseTerm();
+                stack = AbstractionBoundStack::Pop(stack);
+                if ((bool)abstractee)
+                {
+                    result->AbstractionConstructor(std::move(abstractee));
+                    return result;
+                }
+                return nullptr;
             }
 
         };
@@ -350,13 +427,13 @@ namespace DeBruijnIndex
         template <typename T>
         bool Parse(char const *input, TermPtr &result,
             char const *&err, char const *&errpos,
-            T &&query)
+            T &&constants)
         {
-            ParserImpl<T> helper(input, std::forward<T>(query));
-            auto ret = helper.Parse(result);
+            ParserImpl<T> helper(input, std::forward<T>(constants));
+            result = helper.Parse();
             err = helper.err;
             errpos = helper.errpos;
-            return ret;
+            return (bool)result;
         }
     }
 }

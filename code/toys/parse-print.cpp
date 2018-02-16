@@ -4,67 +4,84 @@
 
 
 typedef LambdaCalculus::Term Term;
-typedef Term::RefCountPtr TermPtr;
+typedef Term::Pointer TermPtr;
 
 using namespace DeBruijnIndex::Parser;
 
-struct
+struct EmptyConstantTable
 {
-    template <typename T1, typename T2, typename T3>
-    bool operator () (T1 &&, T2 &&, T3 &&) const
+    template <typename T1, typename T2>
+    TermPtr operator () (T1 &&, T2 &&) const
     {
-        return false;
-    }
-} query;
-
-struct TermPrinter : Term::Visitor<TermPrinter, void(Term *)>
-{
-    friend struct Term::Visitor<TermPrinter, void(Term *)>;
-    TermPrinter() : dummy('a') { }
-    void Print(TermPtr term)
-    {
-        VisitTerm(term.RawPtr());
-    }
-private:
-    char dummy;
-    void VisitInvalidTerm(Term *target)
-    {
-        printf("[invalid]");
-    }
-    void VisitBoundVariableTerm(Term *target)
-    {
-        putchar(dummy - (int)target->AsBoundVariable.Level);
-    }
-    void VisitAbstractionTerm(Term *target)
-    {
-        printf("(%c => ", dummy++);
-        VisitTerm(target->AsAbstraction.Result.RawPtr());
-        putchar(')');
-        --dummy;
-    }
-    void VisitApplicationTerm(Term *target)
-    {
-        printf("Apply[");
-        VisitTerm(target->AsApplication.Function.RawPtr());
-        putchar(',');
-        putchar(' ');
-        VisitTerm(target->AsApplication.Replaced.RawPtr());
-        putchar(']');
-    }
-    void VisitInternalErrorTerm(Term *target)
-    {
-        printf("[internal error]");
+        return nullptr;
     }
 };
+
+struct TermPrinterTag : Term::Visitor<TermPrinterTag, void (TermPtr const &, FILE *, size_t, bool)>
+{
+    friend struct Term::Visitor<TermPrinterTag, void (TermPtr const &, FILE *, size_t, bool)>;
+    TermPrinterTag() { }
+    void Print(TermPtr const &term, FILE *fp = stdout)
+    {
+        VisitTerm(term, fp, 0, true);
+    }
+private:
+    typedef Utilities::PodSurrogate<size_t> VariableNameTag;
+    void VisitInvalidTerm(TermPtr const &, FILE *fp, size_t, bool)
+    {
+        fputs("[invalid]", fp);
+    }
+    void VisitInternalErrorTerm(TermPtr const &, FILE *fp, size_t, bool)
+    {
+        fputs("[internal error]", fp);
+    }
+    void VisitBoundVariableTerm(TermPtr const &target, FILE *fp, size_t level, bool)
+    {
+        fprintf(fp, "%zu", level - target->AsBoundVariable.BoundBy->Tag.RawPtrUnsafe<VariableNameTag>()->Value);
+    }
+    void VisitAbstractionTerm(TermPtr const &target, FILE *fp, size_t level, bool lastAbs)
+    {
+        target->Tag.NewInstance<VariableNameTag>()->Value = level++;
+        if (!lastAbs)
+        {
+            fputc('(', fp);
+        }
+        fputs("lambda ", fp);
+        VisitTerm(target->AsAbstraction.Result, fp, level, true);
+        if (!lastAbs)
+        {
+            fputc(')', fp);
+        }
+        target->Tag = nullptr;
+        --level;
+    }
+    void VisitApplicationTerm(TermPtr const &target, FILE *fp, size_t level, bool lastAbs)
+    {
+        auto const &func = target->AsApplication.Function;
+        auto const &rplc = target->AsApplication.Replaced;
+        bool const paren = (rplc->Kind == Term::ApplicationTerm);
+        VisitTerm(func, fp, level, false);
+        putchar(' ');
+        if (paren)
+        {
+            putchar('(');
+        }
+        VisitTerm(rplc, fp, level, paren || lastAbs);
+        if (paren)
+        {
+            putchar(')');
+        }
+    }
+} TermPrinter;
 
 int main()
 {
     char buffer[1024];
-    char const *err, *errpos;
-    TermPtr result;
     while (scanf("%[^\n]", buffer) == 1)
     {
-        if (!Parse(buffer, result, err, errpos, query))
+        char const *err, *errpos;
+        TermPtr result;
+        if (!Parse(buffer, result, err, errpos, EmptyConstantTable()))
         {
             printf("Error: %s\n", err);
             if (errpos)
@@ -80,7 +97,7 @@ int main()
         }
         else
         {
-            TermPrinter().Print(result);
+            TermPrinter.Print(result);
             putchar('\n');
         }
         int ch;

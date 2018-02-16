@@ -5,6 +5,7 @@
 
 #include<cstdlib>
 #include<utility>
+#include<cstddef>
 #include<typeinfo>
 
 namespace Utilities
@@ -18,7 +19,7 @@ namespace Utilities
      */
 
     template <typename TSmartValueType>
-    struct SmartValueTypeRefCountMemPool
+    struct RefCountMemPool
     {
         struct Entry
         {
@@ -35,17 +36,17 @@ namespace Utilities
             Entry &operator = (Entry const &) = delete;
             ~Entry() = delete;
         };
-        SmartValueTypeRefCountMemPool(size_t suggested = 16)
+        RefCountMemPool(size_t suggested = 16)
             : entries(nullptr), blocks(nullptr),
             nextAlloc(suggested < 16 ? 16 : suggested > 1024 ? 1024 : suggested),
             currentCount(0)
         {
         }
-        SmartValueTypeRefCountMemPool(SmartValueTypeRefCountMemPool const &) = delete;
-        SmartValueTypeRefCountMemPool(SmartValueTypeRefCountMemPool &&) = delete;
-        SmartValueTypeRefCountMemPool &operator = (SmartValueTypeRefCountMemPool const &) = delete;
-        SmartValueTypeRefCountMemPool &operator = (SmartValueTypeRefCountMemPool &&) = delete;
-        ~SmartValueTypeRefCountMemPool()
+        RefCountMemPool(RefCountMemPool const &) = delete;
+        RefCountMemPool(RefCountMemPool &&) = delete;
+        RefCountMemPool &operator = (RefCountMemPool const &) = delete;
+        RefCountMemPool &operator = (RefCountMemPool &&) = delete;
+        ~RefCountMemPool()
         {
             for (auto i = blocks; i; )
             {
@@ -104,6 +105,7 @@ namespace Utilities
             entries = entry;
             ++currentCount;
         }
+        static RefCountMemPool<TSmartValueType> Default;
     private:
         Entry *entries;
         struct Block
@@ -114,23 +116,49 @@ namespace Utilities
         size_t currentCount;
     };
 
-    /* SmartValueTypeRefCountPtr itself is a smart value type. */
     template <typename TSmartValueType>
-    struct SmartValueTypeRefCountPtr
+    RefCountMemPool<TSmartValueType>
+        RefCountMemPool<TSmartValueType>::Default;
+
+    struct VariantPtr;
+
+    /* RefCountPtr itself is a smart value type. */
+    template <typename TSmartValueType>
+    struct RefCountPtr
     {
-        SmartValueTypeRefCountPtr()
+        friend struct VariantPtr;
+    private:
+        typedef RefCountMemPool<TSmartValueType> MemPool;
+        typename MemPool::Entry *entry;
+        RefCountPtr(typename MemPool::Entry *ptr)
+        {
+            FromEntryConstructor(ptr);
+        }
+        void FromEntryConstructor(typename MemPool::Entry *ptr)
+        {
+            entry = ptr;
+            IncreaseReference();
+        }
+    public:
+        RefCountPtr(std::nullptr_t = nullptr)
         {
             DefaultConstructor();
         }
-        SmartValueTypeRefCountPtr(SmartValueTypeRefCountPtr const &other)
+        RefCountPtr(RefCountPtr const &other)
         {
             CopyConstructor(other);
         }
-        SmartValueTypeRefCountPtr(SmartValueTypeRefCountPtr &&other)
+        RefCountPtr(RefCountPtr &&other)
         {
             MoveConstructor(std::move(other));
         }
-        SmartValueTypeRefCountPtr &operator = (SmartValueTypeRefCountPtr &&other)
+        RefCountPtr &operator = (std::nullptr_t)
+        {
+            Finalise();
+            DefaultConstructor();
+            return *this;
+        }
+        RefCountPtr &operator = (RefCountPtr &&other)
         {
             if (entry != other.entry)
             {
@@ -139,7 +167,7 @@ namespace Utilities
             }
             return *this;
         }
-        SmartValueTypeRefCountPtr &operator = (SmartValueTypeRefCountPtr const &other)
+        RefCountPtr &operator = (RefCountPtr const &other)
         {
             if (entry != other.entry)
             {
@@ -152,15 +180,12 @@ namespace Utilities
         {
             entry = nullptr;
         }
-        void CopyConstructor(SmartValueTypeRefCountPtr const &other)
+        void CopyConstructor(RefCountPtr const &other)
         {
             entry = other.entry;
-            if ((bool)entry)
-            {
-                ++entry->ReferenceCount;
-            }
+            IncreaseReference();
         }
-        void MoveConstructor(SmartValueTypeRefCountPtr &&other)
+        void MoveConstructor(RefCountPtr &&other)
         {
             entry = other.entry;
             other.entry = nullptr;
@@ -169,24 +194,23 @@ namespace Utilities
         {
             if ((bool)entry && --entry->ReferenceCount == 0)
             {
-                pool.Deallocate(entry);
+                MemPool::Default.Deallocate(entry);
             }
-            entry = nullptr;
         }
-        ~SmartValueTypeRefCountPtr()
+        ~RefCountPtr()
         {
             Finalise();
         }
-        bool NewInstance()
+        TSmartValueType *NewInstance()
         {
             Finalise();
-            entry = pool.Allocate();
+            entry = MemPool::Default.Allocate();
             if ((bool)entry)
             {
                 ++entry->ReferenceCount;
-                return true;
+                return &entry->Data;
             }
-            return false;
+            return nullptr;
         }
         TSmartValueType *operator -> () const
         {
@@ -194,19 +218,362 @@ namespace Utilities
         }
         TSmartValueType *RawPtr() const
         {
-            return entry ? &entry->Data : nullptr;
+            return (bool)entry ? &entry->Data : nullptr;
         }
-        operator bool () const
+        explicit operator bool () const
         {
             return (bool)entry;
         }
-    private:
-        typename SmartValueTypeRefCountMemPool<TSmartValueType>::Entry *entry;
-        static SmartValueTypeRefCountMemPool<TSmartValueType> pool;
+        friend bool operator == (RefCountPtr const &a, RefCountPtr const &b)
+        {
+            return a.entry == b.entry;
+        }
+        friend bool operator == (RefCountPtr const &a, TSmartValueType const *b)
+        {
+            return a.RawPtr() == b;
+        }
+        friend bool operator == (TSmartValueType const *a, RefCountPtr const &b)
+        {
+            return a == b.RawPtr();
+        }
+        friend bool operator == (RefCountPtr const &ptr, std::nullptr_t)
+        {
+            return !(bool)ptr.entry;
+        }
+        friend bool operator == (std::nullptr_t, RefCountPtr const &ptr)
+        {
+            return !(bool)ptr.entry;
+        }
+        friend bool operator != (RefCountPtr const &a, RefCountPtr const &b)
+        {
+            return a.entry != b.entry;
+        }
+        friend bool operator != (RefCountPtr const &a, TSmartValueType const *b)
+        {
+            return a.RawPtr() != b;
+        }
+        friend bool operator != (TSmartValueType const *a, RefCountPtr const &b)
+        {
+            return a != b.RawPtr();
+        }
+        friend bool operator != (RefCountPtr const &ptr, std::nullptr_t)
+        {
+            return (bool)ptr.entry;
+        }
+        friend bool operator != (std::nullptr_t, RefCountPtr const &ptr)
+        {
+            return (bool)ptr.entry;
+        }
+        void IncreaseReference() const
+        {
+            if ((bool)entry)
+            {
+                ++entry->ReferenceCount;
+            }
+        }
+        void DecreaseReference() const
+        {
+            if ((bool)entry)
+            {
+                --entry->ReferenceCount;
+            }
+        }
+        void Forget()
+        {
+            entry = nullptr;
+        }
     };
 
-    template <typename TSmartValueType>
-    SmartValueTypeRefCountMemPool<TSmartValueType> SmartValueTypeRefCountPtr<TSmartValueType>::pool;
+    struct VariantPtr
+    {
+    private:
+        std::type_info const *type;
+        void *entry;
+        typedef void ManipulatorFunc(void *entry);
+        ManipulatorFunc *incRef, *decRef, *delRef;
+        template <typename T>
+        static void IncreaseReferenceStatic(void *entry)
+        {
+            auto typed = (typename RefCountMemPool<T>::Entry *)entry;
+            ++typed->ReferenceCount;
+        }
+        template <typename T>
+        static void DecreaseReferenceStatic(void *entry)
+        {
+            auto typed = (typename RefCountMemPool<T>::Entry *)entry;
+            --typed->ReferenceCount;
+        }
+        template <typename T>
+        static void ReleaseReferenceStatic(void *entry)
+        {
+            auto typed = (typename RefCountMemPool<T>::Entry *)entry;
+            if (!--typed->ReferenceCount)
+            {
+                RefCountMemPool<T>::Default.Deallocate(typed);
+            }
+        }
+    public:
+        VariantPtr(std::nullptr_t = nullptr)
+        {
+            DefaultConstructor();
+        }
+        VariantPtr(VariantPtr const &other)
+        {
+            CopyConstructor(other);
+        }
+        VariantPtr(VariantPtr &&other)
+        {
+            MoveConstructor(std::move(other));
+        }
+        template <typename T>
+        VariantPtr(RefCountPtr<T> const &ptr)
+        {
+            FromTypedPtrConstructor(ptr);
+        }
+        ~VariantPtr() { Finalise(); }
+        VariantPtr &operator = (std::nullptr_t)
+        {
+            Finalise();
+            DefaultConstructor();
+            return *this;
+        }
+        VariantPtr &operator = (VariantPtr const &other)
+        {
+            if (entry != other.entry)
+            {
+                Finalise();
+                CopyConstructor(other);
+            }
+            return *this;
+        }
+        VariantPtr &operator = (VariantPtr &&other)
+        {
+            if (entry != other.entry)
+            {
+                Finalise();
+                MoveConstructor(std::move(other));
+            }
+            return *this;
+        }
+        template <typename T>
+        VariantPtr &operator = (RefCountPtr<T> const &ptr)
+        {
+            if (entry != ptr.entry)
+            {
+                Finalise();
+                FromTypedPtrConstructor(ptr);
+            }
+            return *this;
+        }
+        void DefaultConstructor()
+        {
+            type = nullptr;
+            entry = nullptr;
+            incRef = nullptr;
+            decRef = nullptr;
+            delRef = nullptr;
+        }
+        void CopyConstructor(VariantPtr const &other)
+        {
+            type = other.type;
+            entry = other.entry;
+            incRef = other.incRef;
+            decRef = other.decRef;
+            delRef = other.delRef;
+            if ((bool)entry)
+            {
+                incRef(entry);
+            }
+        }
+        void MoveConstructor(VariantPtr &&other)
+        {
+            type = other.type;
+            entry = other.entry;
+            incRef = other.incRef;
+            decRef = other.decRef;
+            delRef = other.delRef;
+            other.type = nullptr;
+            other.entry = nullptr;
+            other.incRef = nullptr;
+            other.decRef = nullptr;
+            other.delRef = nullptr;
+        }
+        template <typename T>
+        void FromTypedPtrConstructor(RefCountPtr<T> const &ptr)
+        {
+            if (!(bool)ptr.entry)
+            {
+                DefaultConstructor();
+            }
+            else
+            {
+                type = &typeid(T);
+                entry = ptr.entry;
+                incRef = &IncreaseReferenceStatic<T>;
+                decRef = &DecreaseReferenceStatic<T>;
+                delRef = &ReleaseReferenceStatic<T>;
+                incRef(entry);
+            }
+        }
+        void Finalise()
+        {
+            if ((bool)entry)
+            {
+                delRef(entry);
+            }
+        }
+        template <typename T>
+        T *NewInstance()
+        {
+            Finalise();
+            auto typed = RefCountMemPool<T>::Default.Allocate();
+            if ((bool)typed)
+            {
+                type = &typeid(T);
+                entry = typed;
+                incRef = &IncreaseReferenceStatic<T>;
+                decRef = &DecreaseReferenceStatic<T>;
+                delRef = &ReleaseReferenceStatic<T>;
+                incRef(entry);
+            }
+            else
+            {
+                DefaultConstructor();
+            }
+            return &typed->Data;
+        }
+        template <typename T>
+        T *RawPtr() const
+        {
+            return Is<T>()
+                ? RawPtrUnsafe<T>()
+                : nullptr;
+        }
+        template <typename T>
+        T *RawPtrUnsafe() const
+        {
+            return &((typename RefCountMemPool<T>::Entry *)entry)->Data;
+        }
+        template <typename T>
+        RefCountPtr<T> As() const
+        {
+            return Is<T>()
+                ? AsUnsafe<T>()
+                : nullptr;
+        }
+        template <typename T>
+        RefCountPtr<T> AsUnsafe() const
+        {
+            return (typename RefCountMemPool<T>::Entry *)entry;
+        }
+        template <typename T>
+        bool Is() const
+        {
+            return type != nullptr && *type == typeid(T);
+        }
+        explicit operator bool () const
+        {
+            return (bool)entry;
+        }
+        friend bool operator == (VariantPtr const &a, VariantPtr const &b)
+        {
+            return a.entry == b.entry;
+        }
+        friend bool operator == (VariantPtr const &ptr, std::nullptr_t)
+        {
+            return !(bool)ptr.entry;
+        }
+        friend bool operator == (std::nullptr_t, VariantPtr const &ptr)
+        {
+            return !(bool)ptr.entry;
+        }
+        template <typename T>
+        friend bool operator == (VariantPtr const &a, RefCountPtr<T> const &b)
+        {
+            return a.entry == b.entry;
+        }
+        template <typename T>
+        friend bool operator == (RefCountPtr<T> const &a, VariantPtr const &b)
+        {
+            return a.entry == b.entry;
+        }
+        template <typename T>
+        friend bool operator == (VariantPtr const &variant, T const *raw)
+        {
+            return (!(bool)variant.entry && !(bool)raw)
+                || (variant.Is<T>() && variant.RawPtrUnsafe<T>() == raw);
+        }
+        template <typename T>
+        friend bool operator == (T const *raw, VariantPtr const &variant)
+        {
+            return (!(bool)variant.entry && !(bool)raw)
+                || (variant.Is<T>() && variant.RawPtrUnsafe<T>() == raw);
+        }
+        friend bool operator != (VariantPtr const &a, VariantPtr const &b)
+        {
+            return a.entry != b.entry;
+        }
+        friend bool operator != (VariantPtr const &ptr, std::nullptr_t)
+        {
+            return (bool)ptr.entry;
+        }
+        friend bool operator != (std::nullptr_t, VariantPtr const &ptr)
+        {
+            return (bool)ptr.entry;
+        }
+        template <typename T>
+        friend bool operator != (VariantPtr const &a, RefCountPtr<T> const &b)
+        {
+            return a.entry != b.entry;
+        }
+        template <typename T>
+        friend bool operator != (RefCountPtr<T> const &a, VariantPtr const &b)
+        {
+            return a.entry != b.entry;
+        }
+        template <typename T>
+        friend bool operator != (VariantPtr const &variant, T const *raw)
+        {
+            return !(variant == raw);
+        }
+        template <typename T>
+        friend bool operator != (T const *raw, VariantPtr const &variant)
+        {
+            return !(raw == variant);
+        }
+        void IncreaseReference()
+        {
+            if ((bool)entry)
+            {
+                incRef(entry);
+            }
+        }
+        void DecreaseReference()
+        {
+            if ((bool)entry)
+            {
+                decRef(entry);
+            }
+        }
+        void Forget()
+        {
+            DefaultConstructor();
+        }
+    };
+
+    template <typename T>
+    struct PodSurrogate
+    {
+        PodSurrogate() = delete;
+        PodSurrogate(PodSurrogate const &) = delete;
+        PodSurrogate(PodSurrogate &&) = delete;
+        PodSurrogate &operator = (PodSurrogate const &) = delete;
+        PodSurrogate &operator = (PodSurrogate &&) = delete;
+        ~PodSurrogate() = delete;
+        void DefaultConstructor() { }
+        void Finalise() { }
+        T Value;
+    };
 
 }
 
