@@ -158,21 +158,13 @@ namespace Utilities
             DefaultConstructor();
             return *this;
         }
-        RefCountPtr &operator = (RefCountPtr &&other)
+        RefCountPtr &operator = (RefCountPtr other)
         {
             if (entry != other.entry)
             {
-                Finalise();
-                MoveConstructor(std::move(other));
-            }
-            return *this;
-        }
-        RefCountPtr &operator = (RefCountPtr const &other)
-        {
-            if (entry != other.entry)
-            {
-                Finalise();
-                CopyConstructor(other);
+                auto tmp = entry;
+                entry = other.entry;
+                other.entry = tmp;
             }
             return *this;
         }
@@ -337,21 +329,17 @@ namespace Utilities
             DefaultConstructor();
             return *this;
         }
-        VariantPtr &operator = (VariantPtr const &other)
+        VariantPtr &operator = (VariantPtr other)
         {
             if (entry != other.entry)
             {
-                Finalise();
-                CopyConstructor(other);
-            }
-            return *this;
-        }
-        VariantPtr &operator = (VariantPtr &&other)
-        {
-            if (entry != other.entry)
-            {
-                Finalise();
-                MoveConstructor(std::move(other));
+#define SWAP_MEMBER_HELPER_(member) do { auto tmp = member; member = other.member; other.member = tmp; } while (false)
+                SWAP_MEMBER_HELPER_(type);
+                SWAP_MEMBER_HELPER_(entry);
+                SWAP_MEMBER_HELPER_(incRef);
+                SWAP_MEMBER_HELPER_(decRef);
+                SWAP_MEMBER_HELPER_(delRef);
+#undef SWAP_MEMBER_HELPER_
             }
             return *this;
         }
@@ -360,7 +348,7 @@ namespace Utilities
         {
             if (entry != ptr.entry)
             {
-                Finalise();
+                VariantPtr toss = std::move(*this);
                 FromTypedPtrConstructor(ptr);
             }
             return *this;

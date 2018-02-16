@@ -81,6 +81,21 @@ namespace LambdaCalculus
             Tag.Finalise();
         }
 
+        void RecursivelyClearTag()
+        {
+            Tag = nullptr;
+            switch (Kind)
+            {
+                case AbstractionTerm:
+                    AsAbstraction.Result->RecursivelyClearTag();
+                    break;
+                case ApplicationTerm:
+                    AsApplication.Function->RecursivelyClearTag();
+                    AsApplication.Replaced->RecursivelyClearTag();
+                    break;
+            }
+        }
+
         TermKind Kind;
         /* Convention:
          * - If Kind == InvalidTerm, none of the union members are valid.
