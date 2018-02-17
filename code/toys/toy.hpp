@@ -100,10 +100,10 @@ void HintAndPrintTerm(char const *hint, TermPtr const &term)
     fputc('\n', stdout);
 }
 
-void EatLine()
+void EatLine(int separator = '\n')
 {
     int ch;
-    while ((ch = getchar()) != -1 && ch != '\n')
+    while ((ch = getchar()) != -1 && ch != separator)
         ;
 }
 
